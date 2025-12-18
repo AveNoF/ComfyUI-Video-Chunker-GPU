@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# Video files (Don't upload these!)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Temporary files
+concat_list.txt
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
