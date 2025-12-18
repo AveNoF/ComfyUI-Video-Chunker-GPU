@@ -51,7 +51,7 @@
 #### 準備
 1.  リポジトリをクローンし、ライブラリを入れます。
     ```bash
-    git clone https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git
+    git clone [https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git](https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git)
     cd ComfyUI-Video-Chunker-GPU
     
     # 仮想環境作成 (Ubuntu 24.04+ 推奨)
@@ -59,13 +59,18 @@
     source venv/bin/activate
     pip install -r requirements.txt
     ```
-2.  **【重要】ComfyUI側の準備**
-    ComfyUIの仮想環境にも `piexif` が必要です。Impact Pack等を使っている場合は必須です。
-    ```bash
-    cd ~/ComfyUI
-    source venv/bin/activate
-    pip install piexif
-    ```
+
+2.  **【重要】ComfyUI側の準備 (別PCで行う場合など)**
+    `workflow_api.json` はあくまで「レシピ」です。**料理道具（カスタムノード）はComfyUI側にインストールされている必要があります。**
+    
+    * **カスタムノード**: ComfyUI-Managerの **"Install Missing Custom Nodes"** を使い、JSON内で使われているノード（Impact Pack, VideoHelperSuiteなど）を全てインストールしてください。
+    * **モデル**: CheckpointやVAEモデルも、ComfyUIの `models` フォルダにコピーしておく必要があります。
+    * **依存ライブラリ**: ComfyUIのvenv環境にも `piexif` が必要です。
+        ```bash
+        cd ~/ComfyUI
+        source venv/bin/activate
+        pip install piexif
+        ```
 
 3.  **ワークフローの配置**
     ComfyUIで動画変換用ワークフローを作り、メニューの **"Save (API format)"** でJSONを保存してください。
@@ -140,19 +145,25 @@ It also includes a powerful post-processing tool to automatically fix "Audio Syn
 #### Preparation
 1.  Clone and install.
     ```bash
-    git clone https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git
+    git clone [https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git](https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git)
     cd ComfyUI-Video-Chunker-GPU
     python3 -m venv venv
     source venv/bin/activate
     pip install -r requirements.txt
     ```
-2.  **[Important] ComfyUI Requirements**
-    You must install `piexif` in your ComfyUI environment.
-    ```bash
-    cd ~/ComfyUI
-    source venv/bin/activate
-    pip install piexif
-    ```
+
+2.  **[Important] ComfyUI Setup (For New Machines)**
+    The `workflow_api.json` is just a recipe. **You must install the actual custom nodes on ComfyUI.**
+    
+    * **Custom Nodes**: Use ComfyUI-Manager's **"Install Missing Custom Nodes"** feature to install all nodes used in your JSON (e.g., Impact Pack, VideoHelperSuite).
+    * **Models**: Ensure Checkpoints and VAEs are copied to the ComfyUI `models` folder.
+    * **Dependencies**: You must install `piexif` in your ComfyUI environment.
+        ```bash
+        cd ~/ComfyUI
+        source venv/bin/activate
+        pip install piexif
+        ```
+
 3.  **Workflow**
     Save your ComfyUI workflow as **API format** JSON. Name it `workflow_api.json` and place it in the script folder.
 
