@@ -110,7 +110,10 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         start_frame = int(start_frame)
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        target_fps = 60.0 
+        
+        # ★★★ ここを修正しました (60.0 -> 30.0) ★★★
+        target_fps = 30.0 
+        
         cap.release()
 
         chunk_index = start_frame // CHUNK_SIZE
@@ -133,6 +136,7 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
 
         if NODE_ID_SAVER in workflow:
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
+            # ここで強制的に30fpsをComfyUIに伝えます
             workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = target_fps 
 
         res = queue_prompt(workflow)
