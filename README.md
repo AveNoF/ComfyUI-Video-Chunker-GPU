@@ -26,7 +26,23 @@ VFR完全対応: 可変フレームレートの動画でも音ズレしません
 
 ### 📂 推奨ディレクトリ構成 このツールは ComfyUIフォルダの「横」 に配置することを推奨します。
 
-/home/username/ ├── ComfyUI/ # 既存のComfyUI本体 │ ├── venv/ # (あれば) ここの仮想環境を自動で借ります │ └── output/ # ※スクリプトはこの中に出力されたパーツを探しに行きます │ └── ComfyUI-Video-Chunker-GPU/ # ★このツール ├── run.sh # 生成ランチャー（ダブルクリックで実行） ├── batch_fix_sync.py # ★手動結合・修復ツール ├── process_video.py # 変換コアロジック ├── workflow_api.json # ComfyUIワークフロー ├── input_videos/ # ★ここに変換したい動画を入れる └── fix_work/ # ★修復作業用（batch_fix_sync.pyを実行すると生成） ├── Origin/ # (修復用) 元動画を入れる ├── AInized/ # (修復用) 生成されたAI動画を入れる └── Fixed_Output/ # (修復用) 完成品が出る
+/home/username/
+               ├── ComfyUI/ # 既存のComfyUI本体
+               |                  │ 
+               |                  ├── venv/ # (あれば) ここの仮想環境を自動で借ります 
+               |                  │
+               |                  └── output/ # ※スクリプトはこの中に出力されたパーツを探しに行きます 
+               │ 
+               └── ComfyUI-Video-Chunker-GPU/ # ★このツール
+                                ├── run.sh # 生成ランチャー（ダブルクリックで実行） 
+                                ├── batch_fix_sync.py # ★手動結合・修復ツール
+                                ├── process_video.py # 変換コアロジック
+                                ├── workflow_api.json # ComfyUIワークフロー
+                                ├── input_videos/ # ★ここに変換したい動画を入れる 
+                                └── fix_work/ # ★修復作業用（batch_fix_sync.pyを実行すると生成）
+                                         ├── Origin/ # (修復用) 元動画を入れる
+                                         ├── AInized/ # (修復用) 生成されたAI動画を入れる 
+                                         └── Fixed_Output/ # (修復用) 完成品が出る
 
 ### 🚀 使い方 1: 動画生成 (Upscale / Vid2Vid)
 
