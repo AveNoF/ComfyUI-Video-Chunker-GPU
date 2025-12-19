@@ -1,235 +1,114 @@
-import json
-import requests
-import cv2
-import os
-import time
-import sys
-import subprocess
-import datetime
-import glob
-import argparse
-import traceback
-import re
+<a name="japanese"></a> ## 🇯🇵 日本語 (Japanese)
 
-# ================= Configuration =================
-COMFYUI_URL = "http://127.0.0.1:8188"
-DEFAULT_WORKFLOW_FILE = "workflow_api.json"
-CHUNK_SIZE = 1000          
-MAX_PARALLEL_WORKERS = 1   
-OUTPUT_EXT = ".mp4"
-NODE_ID_LOADER = "1"       
-NODE_ID_SAVER = "4"        
-# ============================================
+ComfyUI Video Chunker は、AnimateDiffやVid2Vidなどの長尺動画生成において発生する 「メインメモリ（RAM）不足によるクラッシュ（OOM）」 を回避するための統合ツールセットです。
 
-USER_HOME = os.path.expanduser("~")
-COMFYUI_OUTPUT_DIR = os.path.join(USER_HOME, "ComfyUI", "output")
-sys.stdout.reconfigure(encoding='utf-8')
+最新版（v3.0）では、「事前CFR変換（Pre-CFR Conversion）」 プロセスを導入しました。 生成を開始する前に、動画のフレームレートを強制的に固定（30fps等）し、フレームのばらつきを整地することで、音ズレや早送り現象を物理的に発生させない 仕組みになっています。
 
-def queue_prompt(workflow):
-    p = {"prompt": workflow}
-    data = json.dumps(p).encode('utf-8')
-    try:
-        resp = requests.post(f"{COMFYUI_URL}/prompt", data=data)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"\n[Fatal Error] Failed to queue prompt: {e}")
-        return None
+### ✨ 主な機能
 
-def wait_for_prompt_completion(prompt_id):
-    while True:
-        try:
-            resp = requests.get(f"{COMFYUI_URL}/history/{prompt_id}")
-            if resp.status_code == 200:
-                if prompt_id in resp.json():
-                    return True
-        except: pass
-        time.sleep(1.0)
+#### 1. バッチ処理ランチャー (batch_run.py) * 自動CFR変換: 入力された動画（VFR/可変フレームレート）を、自動的にffmpegで固定フレームレート（CFR）に変換します。 * 確認フロー: 変換が終わった段階で一時停止し、ユーザーに生成を開始するか（Y/N）を確認します。 * 全自動生成: OKを選択すると、変換済みのクリーンな動画を使ってAI生成・結合・お片付けまでを一気に行います。
 
-def merge_videos_simple(file_list, output_filename, original_video_path):
-    print(f"\n=== Merging {len(file_list)} files (Simple Join) ===")
-    
-    chunk_map = {}
-    pattern = re.compile(r"_part_(\d+)")
-    
-    for f_path in file_list:
-        base = os.path.basename(f_path)
-        match = pattern.search(base)
-        if match:
-            part_idx = int(match.group(1))
-            if part_idx not in chunk_map: chunk_map[part_idx] = []
-            chunk_map[part_idx].append(f_path)
-    
-    final_list = []
-    sorted_indices = sorted(chunk_map.keys())
-    
-    for idx in sorted_indices:
-        candidates = chunk_map[idx]
-        if len(candidates) > 1:
-            candidates.sort()
-            selected = candidates[0]
-            final_list.append(selected)
-        else:
-            final_list.append(candidates[0])
+#### 2. 生成・変換フェーズ (process_video.py) * メモリリーク回避: 動画を指定フレーム数ごとに分割・再起動しながら処理します。 * 単純結合: 入力動画がすでに整っているため、複雑な計算なしで無劣化・完璧な同期を実現します。
 
-    # 結合リスト作成
-    list_txt = "concat_list.txt"
-    with open(list_txt, "w", encoding="utf-8") as f:
-        for vid in final_list:
-            safe_vid = os.path.abspath(vid).replace("'", "'\\''")
-            f.write(f"file '{safe_vid}'\n")
+#### 3. 修復・結合ツール (batch_fix_sync.py) * レスキューツール: 過去に生成して音がズレてしまった動画を、強制リタイミング計算で無理やり同期させて修復します（新規生成には使いません）。
 
-    # シンプル結合
-    # 入力は既にCFR化されているので、複雑な計算なしで単純につなぐのが正解
-    cmd_final = [
-        "ffmpeg", "-y",
-        "-f", "concat", "-safe", "0", "-i", list_txt, # [0] リスト
-        "-i", original_video_path,                    # [1] 音声ソース
-        "-map", "0:v",                                # 映像は結合したもの
-        "-map", "1:a?",                               # 音声は元動画
-        "-c:v", "libx264", "-preset", "p5", "-crf", "18",
-        "-c:a", "aac",              
-        output_filename
-    ]
-    
-    try:
-        subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        cmd_final[cmd_final.index("-c:v") + 1] = "h264_nvenc"
-    except: pass 
+### 📂 推奨ディレクトリ構成
 
-    try:
-        subprocess.run(cmd_final, check=True, stderr=subprocess.DEVNULL)
-        print(f"✅ Merged successfully: {os.path.basename(output_filename)}")
-    except:
-        print("❌ Merge failed.")
+```text /home/username/ ├── ComfyUI/ # 既存のComfyUI本体 │ ├── venv/ # (あれば) ここの仮想環境を自動で借ります │ └── output/ # ※スクリプトはこの中に出力されたパーツを探しに行きます │ └── ComfyUI-Video-Chunker-GPU/ # ★このツール ├── run.sh # ★起動コマンド ├── batch_run.py # 全自動マネージャー（CFR変換+生成） ├── process_video.py # 生成コアロジック ├── batch_fix_sync.py # (旧)修復ツール ├── workflow_api.json # ComfyUIワークフロー ├── input_videos/ # ★ここに変換したい動画を入れる │ └── temp_cfr_ready/ # (自動生成) 変換済み動画の一時置き場 └── queue_done/ # (自動生成) 終わった動画が移動される場所 ```
 
-    if os.path.exists(list_txt): os.remove(list_txt)
+### 🚀 使い方 1: 動画生成 (Upscale / Vid2Vid)
 
-def worker_process(video_path, workflow_file, start_frame, run_id):
-    try:
-        start_frame = int(start_frame)
-        cap = cv2.VideoCapture(video_path)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        target_fps = 60.0 
-        cap.release()
+#### 準備
 
-        chunk_index = start_frame // CHUNK_SIZE
-        part_prefix = f"{run_id}_part_{chunk_index:03d}"
-        
-        search_pattern = os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")
-        if glob.glob(search_pattern):
-            sys.exit(0)
+リポジトリをクローンし、ライブラリを入れます。 ```bash git clone https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git cd ComfyUI-Video-Chunker-GPU
 
-        current_cap = min(CHUNK_SIZE, total_frames - start_frame)
-        print(f"[Worker] Chunk {chunk_index}: {current_cap} frames...")
+仮想環境作成
+python3 -m venv venv source venv/bin/activate pip install -r requirements.txt ```
 
-        with open(workflow_file, "r", encoding="utf-8") as f:
-            workflow = json.load(f)
+【重要】ComfyUI側の準備 workflow_api.json はあくまで「レシピ」です。料理道具（カスタムノード）はComfyUI側にインストールされている必要があります。
 
-        if NODE_ID_LOADER in workflow:
-            workflow[NODE_ID_LOADER]["inputs"]["frame_load_cap"] = current_cap
-            workflow[NODE_ID_LOADER]["inputs"]["skip_first_frames"] = start_frame
-            workflow[NODE_ID_LOADER]["inputs"]["video"] = os.path.abspath(video_path)
+* 必須: ComfyUI-Manager等で、JSON内で使われているノード（VideoHelperSuiteなど）をインストールしてください。 * 依存ライブラリ: ComfyUIのvenv環境にも piexif が必要です。 ```bash cd ~/ComfyUI source venv/bin/activate pip install piexif ```
 
-        if NODE_ID_SAVER in workflow:
-            workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
-            workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = target_fps 
+ワークフローの配置 ComfyUIで動画変換用ワークフローを作り、メニューの "Save (API format)" でJSONを保存してください。 これを workflow_api.json という名前でスクリプトと同じフォルダに置きます。
 
-        res = queue_prompt(workflow)
-        if res and 'prompt_id' in res:
-            wait_for_prompt_completion(res['prompt_id'])
-            sys.exit(0)
-        else:
-            sys.exit(1)
+#### 実行手順
 
-    except Exception:
-        traceback.print_exc()
-        sys.exit(1)
+変換したい動画ファイル（mp4, avi, mov, mkv）を input_videos フォルダに入れます。
 
-def manager_process(original_video_path, workflow_file):
-    print(f"=== Manager Started (Processing CFR Source) ===")
-    cap = cv2.VideoCapture(original_video_path)
-    if not cap.isOpened(): return
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
-    
-    base_name = os.path.splitext(os.path.basename(original_video_path))[0]
-    safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:20]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{safe_base_name}_{timestamp}"
+以下のコマンドを実行します。
 
-    tasks = []
-    for i in range(0, total_frames, CHUNK_SIZE):
-        tasks.append(i)
+```bash ./run.sh ```
 
-    running_procs = [] 
-    task_iter = iter(tasks)
-    error_occurred = False
+Phase 1: 変換 スクリプトが動画を検知し、自動的に 30fps (設定可) の固定フレームレート動画に変換します。
 
-    while True:
-        for p, frame in running_procs[:]:
-            if p.poll() is not None:
-                if p.returncode != 0:
-                    error_occurred = True
-                    break
-                running_procs.remove((p, frame))
-        
-        if error_occurred: break
+Phase 2: 確認 すべての変換が終わると、以下のように聞かれます。 ```text 🚀 Proceed with AI Upscaling for all files? (y/n): ``` * ここで y を入力すると、AI生成が始まります。 * 時間がない場合は n で中断できます（変換済みファイルは保持されます）。
 
-        while len(running_procs) < MAX_PARALLEL_WORKERS:
-            try:
-                next_start_frame = next(task_iter)
-                chunk_index = next_start_frame // CHUNK_SIZE
-                part_prefix = f"{run_id}_part_{chunk_index:03d}"
-                if glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")):
-                    continue
+Phase 3: 生成 ComfyUIによる生成、結合が行われます。完成品は ComfyUI/output に保存され、元の動画は queue_done に移動します。
 
-                cmd = [sys.executable, __file__, original_video_path, workflow_file, 
-                       "--worker_mode", 
-                       "--start_frame", str(next_start_frame), 
-                       "--run_id", run_id]
-                proc = subprocess.Popen(cmd)
-                running_procs.append((proc, next_start_frame))
-                time.sleep(2) 
-            except StopIteration:
-                break 
-        
-        if not running_procs:
-            try:
-                next(iter(tasks))
-                break 
-            except:
-                break 
-        time.sleep(1)
+### 🔧 使い方 2: 過去の動画の修復 (Fixer)
 
-    if not error_occurred:
-        print("\n>>> All chunks completed!")
-        all_files = glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{run_id}_part_*{OUTPUT_EXT}"))
-        all_files.sort()
-        
-        if all_files:
-            final_output_name = f"{run_id}_merged{OUTPUT_EXT}"
-            merge_videos_simple(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), original_video_path)
+「このツール(v3.0)を使う前に生成して、音がズレてしまった動画」を直す場合に使用します。
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("video_path", nargs="?", help="Path to video file")
-    parser.add_argument("workflow_file", nargs="?", default=DEFAULT_WORKFLOW_FILE, help="Path to workflow json")
-    parser.add_argument("--worker_mode", action="store_true")
-    parser.add_argument("--start_frame")
-    parser.add_argument("--run_id")
-    args = parser.parse_args()
+python batch_fix_sync.py を実行してフォルダを作成します。
 
-    if not args.video_path:
-        # 直接呼ばれた場合のフェイルセーフ
-        if args.worker_mode: sys.exit(1)
-        try:
-            input_path = input("Enter video file path: ").strip().strip("'").strip('"')
-            if not input_path: sys.exit(0)
-            args.video_path = input_path
-        except: sys.exit(0)
+フォルダにファイルを入れます。 * fix_work/Origin: 音声が正しい「元動画」 * fix_work/AInized: 生成されたバラバラのパーツ (_part_001.mp4...)
 
-    if args.worker_mode:
-        worker_process(args.video_path, args.workflow_file, args.start_frame, args.run_id)
-    else:
-        manager_process(args.video_path, args.workflow_file)
+もう一度 python batch_fix_sync.py を実行します。 * タイムスタンプを無視して強制的にリタイミングし、結合します。
+
+### ⚙️ 設定の変更
+
+batch_run.py 内でフレームレートなどを変更できます。
+
+```python TARGET_FPS = 30 # 変換するフレームレート (30 or 60推奨) WORKFLOW_FILE = "workflow_api.json" ```
+
+<a name="english"></a> ## 🇺🇸 English
+
+ComfyUI Video Chunker is a toolset designed to prevent System RAM Out-Of-Memory (OOM) crashes when generating long videos (e.g., AnimateDiff, Vid2Vid) in ComfyUI.
+
+Version 3.0 introduces a Pre-CFR Conversion Workflow. Before generation begins, input videos are automatically converted to a Constant Frame Rate (CFR). This ensures that the AI generates frames with perfect timing, eliminating audio desync and speed issues.
+
+### ✨ Features
+
+#### 1. Batch Manager (batch_run.py) * Auto CFR Conversion: Automatically converts VFR inputs to steady CFR (e.g., 30fps) videos using FFmpeg. * Confirmation Step: Pauses after conversion to ask if you want to proceed with the heavy AI generation phase (Y/N). * Automated Pipeline: Handles conversion, generation, merging, and cleanup in one go.
+
+#### 2. Generator (process_video.py) * OOM Prevention: Splits video into chunks and restarts subprocesses to free RAM. * Perfect Sync: Since the input is pre-corrected, the output merges perfectly with the audio without complex calculations.
+
+#### 3. Fixer (batch_fix_sync.py) * Rescue Tool: A standalone tool to fix previously generated videos that have desync issues using forced re-timing logic.
+
+### 🚀 Usage 1: Generating Videos
+
+#### Preparation
+
+Clone and install. ```bash git clone https://github.com/AveNoF/ComfyUI-Video-Chunker-GPU.git cd ComfyUI-Video-Chunker-GPU
+
+python3 -m venv venv source venv/bin/activate pip install -r requirements.txt ```
+
+[Important] ComfyUI Requirements * Custom Nodes: Install nodes (like VideoHelperSuite) via ComfyUI-Manager. * Dependencies: You must install piexif in your ComfyUI environment. ```bash cd ~/ComfyUI source venv/bin/activate pip install piexif ```
+
+Workflow Save your ComfyUI workflow as API format JSON named workflow_api.json and place it in the script folder.
+
+#### Execution Steps
+
+Place video files into input_videos.
+
+Run: ```bash ./run.sh ```
+
+Phase 1: Conversion The script converts all videos to CFR format.
+
+Phase 2: Confirmation Wait for the prompt: ```text 🚀 Proceed with AI Upscaling for all files? (y/n): ``` Type y to start the AI generation.
+
+Phase 3: Generation The script generates, merges, and moves the finished files to ComfyUI/output.
+
+### 🔧 Usage 2: Fixing Old Videos
+
+Use this only for videos generated before v3.0 that have sync issues.
+
+Run python batch_fix_sync.py to create folders.
+
+Place files: * fix_work/Origin: Original videos. * fix_work/AInized: AI chunk files.
+
+Run python batch_fix_sync.py again.
+
+## Requirements * Python 3.10+ * FFmpeg (must be in system PATH) * ComfyUI (running on port 8188) * NVIDIA GPU
+
+## License MIT
