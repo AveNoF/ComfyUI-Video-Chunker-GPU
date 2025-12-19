@@ -18,7 +18,22 @@ ComfyUI Video Chunker は、AnimateDiffやVid2Vidなどの長尺動画生成に�
 
 ### 📂 推奨ディレクトリ構成
 
-```text /home/username/ ├── ComfyUI/ # 既存のComfyUI本体 │ ├── venv/ # (あれば) ここの仮想環境を自動で借ります │ └── output/ # ※スクリプトはこの中に出力されたパーツを探しに行きます │ └── ComfyUI-Video-Chunker-GPU/ # ★このツール ├── run.sh # ★起動コマンド ├── batch_run.py # 全自動マネージャー（CFR変換+生成） ├── process_video.py # 生成コアロジック ├── batch_fix_sync.py # (旧)修復ツール ├── workflow_api.json # ComfyUIワークフロー ├── input_videos/ # ★ここに変換したい動画を入れる │ └── temp_cfr_ready/ # (自動生成) 変換済み動画の一時置き場 └── queue_done/ # (自動生成) 終わった動画が移動される場所 ```
+```
+/home/username/
+  ├── ComfyUI/                  # 既存のComfyUI本体
+  │    ├── venv/                # (あれば) ここの仮想環境を自動で借ります
+  │    └── output/              # ※スクリプトはこの中に出力されたパーツを探しに行きます
+  │
+  └── ComfyUI-Video-Chunker-GPU/ # ★このツール
+       ├── run.sh               # ★起動コマンド
+       ├── batch_run.py         # 全自動マネージャー（CFR変換+生成）
+       ├── process_video.py     # 生成コアロジック
+       ├── batch_fix_sync.py    # (旧)修復ツール
+       ├── workflow_api.json    # ComfyUIワークフロー
+       ├── input_videos/        # ★ここに変換したい動画を入れる
+       │    └── temp_cfr_ready/ # (自動生成) 変換済み動画の一時置き場
+       └── queue_done/          # (自動生成) 終わった動画が移動される場所
+```
 
 ### 🚀 使い方 1: 動画生成 (Upscale / Vid2Vid)
 
