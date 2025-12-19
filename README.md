@@ -2,7 +2,7 @@
 
 [ Japanese | English ]
 
-<a name="japanese"></a> ## 🇯🇵 日本語 (Japanese)
+<a name="japanese"></a> ### 🇯🇵 日本語 (Japanese)
 
 ComfyUI Video Chunker は、AnimateDiffやVid2Vidなどの長尺動画生成において発生する 「メインメモリ（RAM）不足によるクラッシュ（OOM）」 を回避するための統合ツールセットです。
 
