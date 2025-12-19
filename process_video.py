@@ -47,7 +47,6 @@ def wait_for_prompt_completion(prompt_id):
         time.sleep(1.0)
 
 def get_exact_duration(file_path):
-    # 1. まず映像ストリームの長さを取得
     cmd = [
         "ffprobe", "-v", "error", 
         "-select_streams", "v:0",
@@ -59,10 +58,8 @@ def get_exact_duration(file_path):
         res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
         dur = float(res.stdout.strip())
         if dur > 0: return dur
-    except:
-        pass
+    except: pass
     
-    # 2. ダメならコンテナ全体の長さを取得
     cmd2 = [
         "ffprobe", "-v", "error", 
         "-show_entries", "format=duration", 
@@ -72,12 +69,27 @@ def get_exact_duration(file_path):
     try:
         res = subprocess.run(cmd2, stdout=subprocess.PIPE, text=True)
         return float(res.stdout.strip())
-    except:
-        return 0.0
+    except: return 0.0
 
-# ★ Fixツールと全く同じ「絶対時間同期」ロジックをここに実装
+# ★フレーム数を正確に数える関数
+def count_frames_exact(file_path):
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-count_frames",
+        "-show_entries", "stream=nb_read_frames",
+        "-of", "default=nokrint_wrappers=1:nokey=1",
+        file_path
+    ]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
+        frames = int(res.stdout.strip())
+        if frames > 0: return frames
+    except: pass
+    return 0
+
 def merge_videos_unique(file_list, output_filename, original_video_path):
-    print(f"\n=== Merging {len(file_list)} files (Sync & Unique Mode) ===")
+    print(f"\n=== Merging {len(file_list)} files (Re-Timing Mode) ===")
     
     # 1. 重複チェック
     chunk_map = {}
@@ -120,29 +132,37 @@ def merge_videos_unique(file_list, output_filename, original_video_path):
         "-c", "copy", temp_concat
     ], stderr=subprocess.DEVNULL)
 
-    # 3. 時間同期計算 (ここが抜けていました)
+    # 3. 強制リタイミング計算 (Total Frames / Original Duration)
+    # これによりタイムスタンプのズレを無視して均等配置する
     duration_orig = get_exact_duration(original_video_path)
-    duration_ai = get_exact_duration(temp_concat)
+    total_frames = count_frames_exact(temp_concat)
     
-    scale_factor = 1.0
-    if duration_orig > 0 and duration_ai > 0:
-        scale_factor = duration_orig / duration_ai
-        print(f"   📏 Original: {duration_orig:.4f}s / AI: {duration_ai:.4f}s")
-        print(f"   ⚡ Sync Correction: Stretching video by {scale_factor:.6f}x")
-    else:
-        print("   ⚠️ Duration check failed. Assuming 1.0x.")
+    print(f"   📏 Original Duration: {duration_orig:.4f}s")
+    print(f"   🎞️ Total AI Frames: {total_frames}")
 
-    # 4. 強制同期合成 (setptsフィルタを適用)
+    if duration_orig > 0 and total_frames > 0:
+        # 1フレームあたりの理想的な表示時間係数を計算
+        # setpts = N * (DURATION / FRAMES) / TB
+        # これで全フレームが元動画の長さにピタリと収まる
+        retime_expr = f"N*({duration_orig}/{total_frames})/TB"
+        print(f"   ⚡ Re-Timing: Force-distributing {total_frames} frames over {duration_orig}s")
+    else:
+        print("   ⚠️ Stat check failed. Using fallback sync.")
+        retime_expr = "PTS-STARTPTS"
+
+    # 4. 合成実行
     cmd_final = [
         "ffmpeg", "-y",
         "-i", temp_concat,          # [0] AI映像
         "-i", original_video_path,  # [1] 元動画(音声)
-        "-filter_complex", f"[0:v]setpts=PTS*{scale_factor}[v]", 
+        # ★ここが修正点: 壊れたPTSを捨てて、フレーム番号(N)から時刻を再定義
+        "-filter_complex", f"[0:v]setpts={retime_expr}[v]", 
         "-map", "[v]",              
         "-map", "1:a?",             
         "-c:v", "libx264",          
         "-preset", "p5",            
-        "-crf", "18",               
+        "-crf", "18",
+        "-fps_mode", "passthrough",
         "-c:a", "aac",              
         output_filename
     ]
