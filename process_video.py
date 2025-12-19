@@ -9,15 +9,16 @@ import datetime
 import glob
 import argparse
 import traceback
+import shutil
 
 # ================= Configuration =================
 COMFYUI_URL = "http://127.0.0.1:8188"
 DEFAULT_WORKFLOW_FILE = "workflow_api.json"
-CHUNK_SIZE = 1000          # チャンクサイズ（小さいほど安全）
-MAX_PARALLEL_WORKERS = 1   # 並列数（基本は1でOK）
+CHUNK_SIZE = 1000          
+MAX_PARALLEL_WORKERS = 1   
 OUTPUT_EXT = ".mp4"
-NODE_ID_LOADER = "1"       # VHS_LoadVideoのノードID
-NODE_ID_SAVER = "4"        # VHS_VideoCombineのノードID
+NODE_ID_LOADER = "1"       # Load Video
+NODE_ID_SAVER = "4"        # Video Combine (IDが4であることを確認済み)
 # ============================================
 
 USER_HOME = os.path.expanduser("~")
@@ -45,11 +46,50 @@ def wait_for_prompt_completion(prompt_id):
         except: pass
         time.sleep(1.0)
 
-# シンプルな結合と音声合成（FPS変更なし・再エンコードなし）
-def merge_videos_exact_fps(file_list, output_filename, original_video_path, fps):
-    print(f"\n=== Merging {len(file_list)} parts (Original FPS: {fps}) ===")
+# ★新機能: VFR(可変フレームレート)をCFR(固定)に強制変換する
+def convert_to_cfr(input_path):
+    print("\n🔍 Checking video format...")
     
-    # 1. 結合用リスト作成
+    # 1. 元のFPSを探る
+    cap = cv2.VideoCapture(input_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    
+    if fps <= 0 or fps > 120: fps = 30.0 # 異常値なら30に固定
+    
+    print(f"   Detected Base FPS: {fps}")
+    print("⚡ Converting VFR to CFR (Fixed Frame Rate) to prevent audio desync...")
+    
+    # 作業用ファイル名
+    base, _ = os.path.splitext(input_path)
+    output_cfr = base + "_CFR_TEMP.mp4"
+    
+    # ffmpegで強制的に固定FPSに書き直す (-r 指定 + -vsync cfr)
+    # 画質は作業用なのでそこそこで高速に (ultrafast, crf 18)
+    cmd = [
+        "ffmpeg", "-y", 
+        "-i", input_path,
+        "-r", str(fps),          # FPSを強制固定
+        "-vsync", "cfr",         # VFRを無効化
+        "-c:v", "libx264", 
+        "-preset", "ultrafast", 
+        "-crf", "18",
+        "-c:a", "copy",          # 音声はコピー
+        output_cfr
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+        print(f"   ✅ Conversion Complete: {os.path.basename(output_cfr)}")
+        return output_cfr, fps
+    except:
+        print("   ❌ Conversion failed. Using original file (Sync might be off).")
+        return input_path, fps
+
+# 結合処理
+def merge_videos_exact_fps(file_list, output_filename, audio_source_path, fps):
+    print(f"\n=== Merging {len(file_list)} parts (FPS: {fps}) ===")
+    
     temp_concat = output_filename.replace(".mp4", "_temp.mp4")
     list_txt = "concat_list.txt"
     
@@ -58,29 +98,23 @@ def merge_videos_exact_fps(file_list, output_filename, original_video_path, fps)
             safe_vid = vid.replace("'", "'\\''")
             f.write(f"file '{safe_vid}'\n")
 
-    # 2. 単純結合
-    cmd_concat = [
+    # 結合
+    subprocess.run([
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_txt, 
         "-c", "copy", temp_concat
-    ]
-    try:
-        subprocess.run(cmd_concat, check=True, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        print("[Error] Concatenation failed.")
-        if os.path.exists(list_txt): os.remove(list_txt)
-        return
+    ], stderr=subprocess.DEVNULL)
 
-    # 3. 音声合成 (映像copy / 音声aac / FPS維持)
-    print(f"Adding Audio from original source...")
+    # 音声合成 (変換後のCFR動画から音をもらうことでズレを防止)
+    print(f"Adding Audio...")
     cmd_mux = [
         "ffmpeg", "-y",
-        "-i", temp_concat,          # 映像 (AI)
-        "-i", original_video_path,  # 音声 (元動画)
-        "-map", "0:v",              # 映像トラック
-        "-map", "1:a?",             # 音声トラック(あれば)
-        "-c:v", "copy",             # ★再エンコードなし（絶対ズレない）
-        "-c:a", "aac",              # 音声はAAC
-        "-shortest",                # 短い方に合わせる
+        "-i", temp_concat,          
+        "-i", audio_source_path,    
+        "-map", "0:v",              
+        "-map", "1:a?",             
+        "-c:v", "copy",             
+        "-c:a", "aac",              
+        "-shortest",                
         output_filename
     ]
     
@@ -90,49 +124,44 @@ def merge_videos_exact_fps(file_list, output_filename, original_video_path, fps)
     except:
         print("[Error] Audio Muxing failed.")
     
-    # お掃除
     if os.path.exists(list_txt): os.remove(list_txt)
     if os.path.exists(temp_concat): os.remove(temp_concat)
 
 # ---------------------------------------------------------
-# Worker Process
+# Worker
 # ---------------------------------------------------------
-def worker_process(video_path, workflow_file, start_frame, run_id):
+def worker_process(video_path, workflow_file, start_frame, run_id, fixed_fps):
     try:
         start_frame = int(start_frame)
-        
-        # FPS情報の取得
+        fps = float(fixed_fps)
+
+        # 動画長さ確認
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened(): sys.exit(1)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS) # ★元動画のFPSを取得
         cap.release()
 
         chunk_index = start_frame // CHUNK_SIZE
         part_prefix = f"{run_id}_part_{chunk_index:03d}"
         
-        # 既に終わってるかチェック
         search_pattern = os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")
         if glob.glob(search_pattern):
             sys.exit(0)
 
         current_cap = min(CHUNK_SIZE, total_frames - start_frame)
-        print(f"[Worker] Chunk {chunk_index}: Processing {current_cap} frames (Target FPS: {fps:.4f})...")
+        print(f"[Worker] Chunk {chunk_index}: {current_cap} frames (FPS: {fps})...")
 
         with open(workflow_file, "r", encoding="utf-8") as f:
             workflow = json.load(f)
 
-        # ノード設定の更新
         if NODE_ID_LOADER in workflow:
             workflow[NODE_ID_LOADER]["inputs"]["frame_load_cap"] = current_cap
             workflow[NODE_ID_LOADER]["inputs"]["skip_first_frames"] = start_frame
             workflow[NODE_ID_LOADER]["inputs"]["video"] = os.path.abspath(video_path)
-            # 念のため読み込み時もFPSを指定
-            workflow[NODE_ID_LOADER]["inputs"]["force_rate"] = fps 
+            # CFR化したのでForce Rateは不要だが念のため
+            # workflow[NODE_ID_LOADER]["inputs"]["force_rate"] = fps 
 
         if NODE_ID_SAVER in workflow:
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
-            # ★保存FPSを元動画と完全に一致させる
             workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = fps 
 
         res = queue_prompt(workflow)
@@ -148,21 +177,24 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         sys.exit(1)
 
 # ---------------------------------------------------------
-# Manager Process
+# Manager
 # ---------------------------------------------------------
-def manager_process(video_path, workflow_file):
-    print(f"=== Manager Started: Exact-FPS Mode ({MAX_PARALLEL_WORKERS} workers) ===")
+def manager_process(original_video_path, workflow_file):
+    print(f"=== Manager Started: VFR-Safe Mode ({MAX_PARALLEL_WORKERS} workers) ===")
     
-    cap = cv2.VideoCapture(video_path)
+    # ★ここで最初にCFR変換を実行！
+    # 処理にはこの「整えられた一時ファイル」を使う
+    working_video, fps = convert_to_cfr(original_video_path)
+    
+    cap = cv2.VideoCapture(working_video)
     if not cap.isOpened(): return
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
     cap.release()
     
-    print(f"Original Video: {total_frames} frames / {fps:.3f} fps")
-    print("★ Processing will maintain exact frame rate.")
+    print(f"Target Video: {total_frames} frames / {fps:.3f} fps")
 
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    # ID生成
+    base_name = os.path.splitext(os.path.basename(original_video_path))[0]
     safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:20]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_id = f"{safe_base_name}_{timestamp}"
@@ -190,12 +222,15 @@ def manager_process(video_path, workflow_file):
                 next_start_frame = next(task_iter)
                 chunk_index = next_start_frame // CHUNK_SIZE
                 part_prefix = f"{run_id}_part_{chunk_index:03d}"
-                # 既存ファイルスキップ
                 if glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")):
                     continue
 
-                cmd = [sys.executable, __file__, video_path, workflow_file, 
-                       "--worker_mode", "--start_frame", str(next_start_frame), "--run_id", run_id]
+                # ワーカーには「CFR変換後のファイル」を渡す
+                cmd = [sys.executable, __file__, working_video, workflow_file, 
+                       "--worker_mode", 
+                       "--start_frame", str(next_start_frame), 
+                       "--run_id", run_id,
+                       "--fps", str(fps)]
                 proc = subprocess.Popen(cmd)
                 running_procs.append((proc, next_start_frame))
                 time.sleep(2) 
@@ -210,19 +245,21 @@ def manager_process(video_path, workflow_file):
                 break 
         time.sleep(1)
 
-    if error_occurred:
-        print("❌ Worker Error. Stopping.")
-        sys.exit(1)
-
-    print("\n>>> All chunks completed!")
-
     # 結合処理
-    all_files = glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{run_id}_part_*{OUTPUT_EXT}"))
-    all_files.sort()
-    
-    if all_files:
-        final_output_name = f"{run_id}_merged{OUTPUT_EXT}"
-        merge_videos_exact_fps(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), video_path, fps)
+    if not error_occurred:
+        print("\n>>> All chunks completed!")
+        all_files = glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{run_id}_part_*{OUTPUT_EXT}"))
+        all_files.sort()
+        
+        if all_files:
+            final_output_name = f"{run_id}_merged{OUTPUT_EXT}"
+            # 音声も「CFR変換後のファイル」から取ることでタイミングを合わせる
+            merge_videos_exact_fps(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), working_video, fps)
+
+    # 一時ファイルの掃除
+    if working_video != original_video_path and os.path.exists(working_video):
+        print(f"Cleaning up temp file: {working_video}")
+        os.remove(working_video)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -231,6 +268,7 @@ if __name__ == "__main__":
     parser.add_argument("--worker_mode", action="store_true")
     parser.add_argument("--start_frame")
     parser.add_argument("--run_id")
+    parser.add_argument("--fps")
     args = parser.parse_args()
 
     if not args.video_path:
@@ -242,6 +280,6 @@ if __name__ == "__main__":
         except: sys.exit(0)
 
     if args.worker_mode:
-        worker_process(args.video_path, args.workflow_file, args.start_frame, args.run_id)
+        worker_process(args.video_path, args.workflow_file, args.start_frame, args.run_id, args.fps)
     else:
         manager_process(args.video_path, args.workflow_file)
