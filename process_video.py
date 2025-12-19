@@ -46,52 +46,9 @@ def wait_for_prompt_completion(prompt_id):
         except: pass
         time.sleep(1.0)
 
-def get_exact_duration(file_path):
-    cmd = [
-        "ffprobe", "-v", "error", 
-        "-select_streams", "v:0",
-        "-show_entries", "stream=duration", 
-        "-of", "default=noprint_wrappers=1:nokey=1", 
-        file_path
-    ]
-    try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-        dur = float(res.stdout.strip())
-        if dur > 0: return dur
-    except: pass
+def merge_videos_simple(file_list, output_filename, original_video_path):
+    print(f"\n=== Merging {len(file_list)} files (Simple Join) ===")
     
-    cmd2 = [
-        "ffprobe", "-v", "error", 
-        "-show_entries", "format=duration", 
-        "-of", "default=noprint_wrappers=1:nokey=1", 
-        file_path
-    ]
-    try:
-        res = subprocess.run(cmd2, stdout=subprocess.PIPE, text=True)
-        return float(res.stdout.strip())
-    except: return 0.0
-
-# ★フレーム数を正確に数える関数
-def count_frames_exact(file_path):
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-count_frames",
-        "-show_entries", "stream=nb_read_frames",
-        "-of", "default=nokrint_wrappers=1:nokey=1",
-        file_path
-    ]
-    try:
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
-        frames = int(res.stdout.strip())
-        if frames > 0: return frames
-    except: pass
-    return 0
-
-def merge_videos_unique(file_list, output_filename, original_video_path):
-    print(f"\n=== Merging {len(file_list)} files (Re-Timing Mode) ===")
-    
-    # 1. 重複チェック
     chunk_map = {}
     pattern = re.compile(r"_part_(\d+)")
     
@@ -100,8 +57,7 @@ def merge_videos_unique(file_list, output_filename, original_video_path):
         match = pattern.search(base)
         if match:
             part_idx = int(match.group(1))
-            if part_idx not in chunk_map:
-                chunk_map[part_idx] = []
+            if part_idx not in chunk_map: chunk_map[part_idx] = []
             chunk_map[part_idx].append(f_path)
     
     final_list = []
@@ -112,57 +68,26 @@ def merge_videos_unique(file_list, output_filename, original_video_path):
         if len(candidates) > 1:
             candidates.sort()
             selected = candidates[0]
-            print(f"⚠️ Warning: Part {idx:03d} has duplicates! Using: {os.path.basename(selected)}")
             final_list.append(selected)
         else:
             final_list.append(candidates[0])
 
-    # 2. 一時結合（映像のみ）
-    temp_concat = output_filename.replace(".mp4", "_temp_concat.mp4")
+    # 結合リスト作成
     list_txt = "concat_list.txt"
-    if os.path.exists(temp_concat): os.remove(temp_concat)
-
     with open(list_txt, "w", encoding="utf-8") as f:
         for vid in final_list:
             safe_vid = os.path.abspath(vid).replace("'", "'\\''")
             f.write(f"file '{safe_vid}'\n")
 
-    subprocess.run([
-        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_txt, 
-        "-c", "copy", temp_concat
-    ], stderr=subprocess.DEVNULL)
-
-    # 3. 強制リタイミング計算 (Total Frames / Original Duration)
-    # これによりタイムスタンプのズレを無視して均等配置する
-    duration_orig = get_exact_duration(original_video_path)
-    total_frames = count_frames_exact(temp_concat)
-    
-    print(f"   📏 Original Duration: {duration_orig:.4f}s")
-    print(f"   🎞️ Total AI Frames: {total_frames}")
-
-    if duration_orig > 0 and total_frames > 0:
-        # 1フレームあたりの理想的な表示時間係数を計算
-        # setpts = N * (DURATION / FRAMES) / TB
-        # これで全フレームが元動画の長さにピタリと収まる
-        retime_expr = f"N*({duration_orig}/{total_frames})/TB"
-        print(f"   ⚡ Re-Timing: Force-distributing {total_frames} frames over {duration_orig}s")
-    else:
-        print("   ⚠️ Stat check failed. Using fallback sync.")
-        retime_expr = "PTS-STARTPTS"
-
-    # 4. 合成実行
+    # シンプル結合
+    # 入力は既にCFR化されているので、複雑な計算なしで単純につなぐのが正解
     cmd_final = [
         "ffmpeg", "-y",
-        "-i", temp_concat,          # [0] AI映像
-        "-i", original_video_path,  # [1] 元動画(音声)
-        # ★ここが修正点: 壊れたPTSを捨てて、フレーム番号(N)から時刻を再定義
-        "-filter_complex", f"[0:v]setpts={retime_expr}[v]", 
-        "-map", "[v]",              
-        "-map", "1:a?",             
-        "-c:v", "libx264",          
-        "-preset", "p5",            
-        "-crf", "18",
-        "-fps_mode", "passthrough",
+        "-f", "concat", "-safe", "0", "-i", list_txt, # [0] リスト
+        "-i", original_video_path,                    # [1] 音声ソース
+        "-map", "0:v",                                # 映像は結合したもの
+        "-map", "1:a?",                               # 音声は元動画
+        "-c:v", "libx264", "-preset", "p5", "-crf", "18",
         "-c:a", "aac",              
         output_filename
     ]
@@ -174,12 +99,11 @@ def merge_videos_unique(file_list, output_filename, original_video_path):
 
     try:
         subprocess.run(cmd_final, check=True, stderr=subprocess.DEVNULL)
-        print(f"✅ Success! Saved to: {output_filename}")
+        print(f"✅ Merged successfully: {os.path.basename(output_filename)}")
     except:
         print("❌ Merge failed.")
 
     if os.path.exists(list_txt): os.remove(list_txt)
-    if os.path.exists(temp_concat): os.remove(temp_concat)
 
 def worker_process(video_path, workflow_file, start_frame, run_id):
     try:
@@ -223,7 +147,7 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         sys.exit(1)
 
 def manager_process(original_video_path, workflow_file):
-    print(f"=== Manager Started: Sync & Unique Mode ===")
+    print(f"=== Manager Started (Processing CFR Source) ===")
     cap = cv2.VideoCapture(original_video_path)
     if not cap.isOpened(): return
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -285,7 +209,7 @@ def manager_process(original_video_path, workflow_file):
         
         if all_files:
             final_output_name = f"{run_id}_merged{OUTPUT_EXT}"
-            merge_videos_unique(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), original_video_path)
+            merge_videos_simple(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), original_video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -297,6 +221,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if not args.video_path:
+        # 直接呼ばれた場合のフェイルセーフ
         if args.worker_mode: sys.exit(1)
         try:
             input_path = input("Enter video file path: ").strip().strip("'").strip('"')
