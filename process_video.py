@@ -9,6 +9,7 @@ import datetime
 import glob
 import argparse
 import traceback
+import re
 
 # ================= Configuration =================
 COMFYUI_URL = "http://127.0.0.1:8188"
@@ -45,46 +46,59 @@ def wait_for_prompt_completion(prompt_id):
         except: pass
         time.sleep(1.0)
 
-# 正確な時間を取得（ストリームとコンテナ両方をチェック）
 def get_exact_duration(file_path):
-    # 1. まず映像ストリームの長さを取得
-    cmd = [
-        "ffprobe", "-v", "error", 
-        "-select_streams", "v:0",
-        "-show_entries", "stream=duration", 
-        "-of", "default=noprint_wrappers=1:nokey=1", 
-        file_path
-    ]
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path]
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
         dur = float(res.stdout.strip())
         if dur > 0: return dur
-    except:
-        pass
-    
-    # 2. ダメならコンテナ全体の長さを取得
-    cmd2 = [
-        "ffprobe", "-v", "error", 
-        "-show_entries", "format=duration", 
-        "-of", "default=noprint_wrappers=1:nokey=1", 
-        file_path
-    ]
-    try:
-        res = subprocess.run(cmd2, stdout=subprocess.PIPE, text=True)
-        return float(res.stdout.strip())
-    except:
-        return 0.0
+    except: pass
+    return 0.0
 
-# VFR対策：時間を強制的に合わせる結合
-def merge_videos_force_sync(file_list, output_filename, original_video_path):
-    print(f"\n=== Merging {len(file_list)} parts with ABSOLUTE DURATION SYNC ===")
+# ★重複排除ロジックを追加した結合関数
+def merge_videos_unique(file_list, output_filename, original_video_path):
+    print(f"\n=== Merging {len(file_list)} files (Filtering Duplicates...) ===")
     
-    # 1. まず単純結合（映像のみ）
+    # 1. 重複チェック: パート番号ごとにファイルを整理
+    # ファイル名から "part_XXX" を抜き出す
+    chunk_map = {}
+    pattern = re.compile(r"_part_(\d+)")
+    
+    for f_path in file_list:
+        base = os.path.basename(f_path)
+        match = pattern.search(base)
+        if match:
+            part_idx = int(match.group(1))
+            if part_idx not in chunk_map:
+                chunk_map[part_idx] = []
+            chunk_map[part_idx].append(f_path)
+    
+    # 2. 各パートから「1つだけ」選ぶ
+    # (もし複数あったら、ファイル名が短い方=余計な接尾辞がない方を選ぶ、などのルールで統一)
+    final_list = []
+    sorted_indices = sorted(chunk_map.keys())
+    
+    for idx in sorted_indices:
+        candidates = chunk_map[idx]
+        if len(candidates) > 1:
+            # 重複発見！警告を出して1つに絞る
+            # ここでは「ファイルサイズが大きい方」あるいは「単純にソートして先頭」を選ぶ
+            # 通常、ComfyUIは連番をつけるので、一番若い番号を採用するのが安全
+            candidates.sort() 
+            selected = candidates[0]
+            print(f"⚠️ Warning: Part {idx:03d} has duplicates! Using: {os.path.basename(selected)}")
+            print(f"   (Ignored: {[os.path.basename(c) for c in candidates if c != selected]})")
+            final_list.append(selected)
+        else:
+            final_list.append(candidates[0])
+
+    print(f"✅ Final List: {len(final_list)} unique chunks.")
+
+    # 3. 結合リスト作成
     temp_concat = output_filename.replace(".mp4", "_temp_concat.mp4")
     list_txt = "concat_list.txt"
-    
     with open(list_txt, "w", encoding="utf-8") as f:
-        for vid in file_list:
+        for vid in final_list:
             safe_vid = vid.replace("'", "'\\''")
             f.write(f"file '{safe_vid}'\n")
 
@@ -93,54 +107,39 @@ def merge_videos_force_sync(file_list, output_filename, original_video_path):
         "-c", "copy", temp_concat
     ], stderr=subprocess.DEVNULL)
 
-    # 2. 時間のズレを計算
+    # 4. 時間同期処理
     duration_orig = get_exact_duration(original_video_path)
     duration_ai = get_exact_duration(temp_concat)
     
     scale_factor = 1.0
     if duration_orig > 0 and duration_ai > 0:
         scale_factor = duration_orig / duration_ai
-        print(f"   Original Duration: {duration_orig:.4f}s")
-        print(f"   AI Video Duration: {duration_ai:.4f}s")
-        print(f"   ⚡ Sync Correction: Stretching video by {scale_factor:.6f}x")
-    else:
-        print("   ⚠️ Duration check failed. Assuming 1.0x.")
+        print(f"   Original: {duration_orig:.4f}s / AI: {duration_ai:.4f}s (Scale: {scale_factor:.6f})")
 
-    # 3. 強制同期合成
-    # setptsで映像の長さを変える + 音声は元動画からそのまま使う + 最長時間を確保
     cmd_final = [
         "ffmpeg", "-y",
-        "-i", temp_concat,          # [0] AI映像
-        "-i", original_video_path,  # [1] 元動画(音声のマスター)
+        "-i", temp_concat,          
+        "-i", original_video_path,  
         "-filter_complex", f"[0:v]setpts=PTS*{scale_factor}[v]", 
-        "-map", "[v]",              # 伸縮した映像
-        "-map", "1:a?",             # 元の音声(絶対)
-        "-c:v", "libx264",          # 再エンコード
+        "-map", "[v]",              
+        "-map", "1:a?",             
+        "-c:v", "libx264",          
         "-preset", "p5",            
         "-crf", "18",               
-        "-c:a", "aac",              # 音声変換
-        # -shortest は外す（音声が切れるのを防ぐ）
-        # -t で「元動画の秒数」で強制的に切ることも可能だが、
-        # 映像をストレッチしているので自然に合うはず
+        "-c:a", "aac",              
         output_filename
     ]
     
-    # GPUエンコードチェック
     try:
         subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         cmd_final[cmd_final.index("-c:v") + 1] = "h264_nvenc"
-    except:
-        pass 
+    except: pass 
 
     try:
         subprocess.run(cmd_final, check=True, stderr=subprocess.DEVNULL)
-        print(f"✅ Success! Video duration is forced to match original: {output_filename}")
+        print(f"✅ Success! Saved to: {output_filename}")
     except:
-        print("❌ Final Merge failed. Trying fallback copy...")
-        subprocess.run([
-            "ffmpeg", "-y", "-i", temp_concat, "-i", original_video_path,
-            "-map", "0:v", "-map", "1:a?", "-c", "copy", output_filename
-        ], stderr=subprocess.DEVNULL)
+        print("❌ Merge failed.")
 
     if os.path.exists(list_txt): os.remove(list_txt)
     if os.path.exists(temp_concat): os.remove(temp_concat)
@@ -148,16 +147,15 @@ def merge_videos_force_sync(file_list, output_filename, original_video_path):
 def worker_process(video_path, workflow_file, start_frame, run_id):
     try:
         start_frame = int(start_frame)
-
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        # VFR対策: FPSは決め打ちで60にして、とにかく「全フレーム」を出させる
         target_fps = 60.0 
         cap.release()
 
         chunk_index = start_frame // CHUNK_SIZE
         part_prefix = f"{run_id}_part_{chunk_index:03d}"
         
+        # 重複チェック: 既にどれか1つでもあればスキップ
         search_pattern = os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")
         if glob.glob(search_pattern):
             sys.exit(0)
@@ -172,7 +170,6 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
             workflow[NODE_ID_LOADER]["inputs"]["frame_load_cap"] = current_cap
             workflow[NODE_ID_LOADER]["inputs"]["skip_first_frames"] = start_frame
             workflow[NODE_ID_LOADER]["inputs"]["video"] = os.path.abspath(video_path)
-            # force_rateは指定しない（全フレーム抽出優先）
 
         if NODE_ID_SAVER in workflow:
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
@@ -190,16 +187,12 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         sys.exit(1)
 
 def manager_process(original_video_path, workflow_file):
-    print(f"=== Manager Started: Absolute-Duration Sync Mode ===")
-    
-    # フレームカウント取得
+    print(f"=== Manager Started: No-Duplicate Mode ===")
     cap = cv2.VideoCapture(original_video_path)
     if not cap.isOpened(): return
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     
-    print(f"Processing Target: {total_frames} frames")
-
     base_name = os.path.splitext(os.path.basename(original_video_path))[0]
     safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:20]
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -251,12 +244,14 @@ def manager_process(original_video_path, workflow_file):
 
     if not error_occurred:
         print("\n>>> All chunks completed!")
+        # 緩い条件でファイルを集める（重複含む）
         all_files = glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{run_id}_part_*{OUTPUT_EXT}"))
         all_files.sort()
         
         if all_files:
             final_output_name = f"{run_id}_merged{OUTPUT_EXT}"
-            merge_videos_force_sync(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), original_video_path)
+            # ★ここで重複排除しながら結合！
+            merge_videos_unique(all_files, os.path.join(COMFYUI_OUTPUT_DIR, final_output_name), original_video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -4,6 +4,7 @@ import subprocess
 import argparse
 import shutil
 import sys
+import re
 
 # ================= 設定エリア =================
 BASE_WORK_DIR = "fix_work"
@@ -47,12 +48,48 @@ def get_exact_duration(file_path):
         return 0.0
 
 def fix_single_video(origin_path, chunk_files, output_path):
-    print(f"   ... {len(chunk_files)} 個のチャンクを結合中")
+    print(f"   ... Checking {len(chunk_files)} candidate files...")
+
+    # ==========================================
+    # ★重複排除ロジック (process_video.pyと同様)
+    # ==========================================
+    chunk_map = {}
+    pattern = re.compile(r"_part_(\d+)")
+    
+    for f_path in chunk_files:
+        base = os.path.basename(f_path)
+        match = pattern.search(base)
+        if match:
+            part_idx = int(match.group(1))
+            if part_idx not in chunk_map:
+                chunk_map[part_idx] = []
+            chunk_map[part_idx].append(f_path)
+    
+    final_list = []
+    sorted_indices = sorted(chunk_map.keys())
+    
+    for idx in sorted_indices:
+        candidates = chunk_map[idx]
+        if len(candidates) > 1:
+            # 重複がある場合、名前順でソートして先頭の1つを採用
+            # (例: _part_001.mp4 と _part_001_audio.mp4 があれば、辞書順で若い方を採用)
+            candidates.sort()
+            selected = candidates[0]
+            print(f"   ⚠️ Warning: Part {idx:03d} has duplicates! Using: {os.path.basename(selected)}")
+            final_list.append(selected)
+        else:
+            final_list.append(candidates[0])
+
+    if not final_list:
+        print("   ❌ Valid chunks not found.")
+        return
+
+    print(f"   ✅ Merging {len(final_list)} unique chunks...")
 
     # 1. 結合リスト作成
     list_txt = "temp_batch_list.txt"
     with open(list_txt, "w", encoding="utf-8") as f:
-        for vid in chunk_files:
+        for vid in final_list:
             abs_path = os.path.abspath(vid).replace("'", "'\\''")
             f.write(f"file '{abs_path}'\n")
 
@@ -78,6 +115,7 @@ def fix_single_video(origin_path, chunk_files, output_path):
         print("   ⚠️ Duration check failed. Assuming 1.0x.")
 
     # 4. 強制同期合成 (Time-Stretch + Audio Replacement)
+    # 映像を伸縮させ、音声は元動画のものを使う
     cmd_final = [
         "ffmpeg", "-y",
         "-i", temp_concat,       # [0] AI映像
@@ -133,20 +171,18 @@ def main():
         print("2. 'fix_work/AInized' に生成された断片動画(_part_xxx.mp4)を入れてください。")
         return
 
-    print(f"\n=== 全自動修復バッチ処理 (絶対時間同期モード) ===\n")
+    print(f"\n=== 全自動修復バッチ処理 (重複排除 & 絶対同期モード) ===\n")
 
     for i, origin_path in enumerate(origin_files):
         filename = os.path.basename(origin_path)
         print(f"[{i+1}/{len(origin_files)}] ターゲット: {filename}")
         safe_name = get_safe_base_name(filename)
         
-        # 緩い検索: ファイル名の一部が一致するものを探す
+        # 緩い検索
         search_pattern = os.path.join(ainized_dir, f"*{safe_name}*_part_*.mp4")
         found_chunks = glob.glob(search_pattern)
         
-        # 見つからない場合、より緩く探す（タイムスタンプ部分を無視）
         if not found_chunks:
-            # 元ファイル名の先頭10文字だけで探してみる
             short_name = safe_name[:10]
             search_pattern = os.path.join(ainized_dir, f"*{short_name}*_part_*.mp4")
             found_chunks = glob.glob(search_pattern)
@@ -155,29 +191,31 @@ def main():
             print(f"   ⚠️ 対応するAI動画が見つかりません: {safe_name}")
             continue
 
-        # 複数の実行結果が混ざっている場合、最新のセットだけを使う
+        # run_idごとにグループ化して、一番新しい実行セットを採用する
         run_groups = {}
         for chunk in found_chunks:
-            if "_part_" in chunk:
-                # パスからファイル名を取得し、_part_より前をIDとする
-                base = os.path.basename(chunk)
-                run_id = base.split("_part_")[0]
+            base = os.path.basename(chunk)
+            # 正規表現で _part_XXX の前までを取得してIDとする
+            match = re.match(r"(.+)_part_\d+", base)
+            if match:
+                run_id = match.group(1)
                 if run_id not in run_groups: run_groups[run_id] = []
                 run_groups[run_id].append(chunk)
         
         if not run_groups:
-            print("   ⚠️ チャンクファイルの形式が一致しません。")
+            print("   ⚠️ ファイル名の形式が一致しません。")
             continue
 
-        # 一番新しい実行ID（文字列ソートで最後に来るもの＝日付が新しい）を選択
+        # 最新のIDセットを選択
         latest_run_id = sorted(run_groups.keys())[-1]
         target_chunks = sorted(run_groups[latest_run_id])
         
-        print(f"   -> 検出セット: {latest_run_id} ({len(target_chunks)} files)")
+        print(f"   -> 検出セットID: {latest_run_id}")
 
         fixed_filename = f"Fixed_{filename}"
         fixed_output_path = os.path.join(output_dir, fixed_filename)
         
+        # ここで重複排除と結合を行う
         fix_single_video(origin_path, target_chunks, fixed_output_path)
 
     print("\n=== 全ての処理が完了しました ===")
