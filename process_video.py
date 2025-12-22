@@ -68,7 +68,8 @@ def merge_videos_simple(file_list, output_filename, original_video_path):
         if len(candidates) > 1:
             candidates.sort()
             selected = candidates[0]
-            print(f"⚠️ Warning: Part {idx:03d} has duplicates! Using: {os.path.basename(selected)}")
+            if len(candidates) > 1:
+                print(f"⚠️ Warning: Part {idx:03d} has duplicates! Using: {os.path.basename(selected)}")
             final_list.append(selected)
         else:
             final_list.append(candidates[0])
@@ -111,7 +112,7 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         cap = cv2.VideoCapture(video_path)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
-        # ★★★ ここを修正しました (60.0 -> 30.0) ★★★
+        # 30fps強制 (重要)
         target_fps = 30.0 
         
         cap.release()
@@ -119,12 +120,20 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
         chunk_index = start_frame // CHUNK_SIZE
         part_prefix = f"{run_id}_part_{chunk_index:03d}"
         
+        # ★ ここで「すでにファイルがあるか」をチェックして、あれば終了(スキップ)する
         search_pattern = os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")
-        if glob.glob(search_pattern):
-            sys.exit(0)
+        existing_files = glob.glob(search_pattern)
+        
+        # 0バイトの破損ファイルでなければスキップ
+        if existing_files:
+            if os.path.getsize(existing_files[0]) > 1024:
+                print(f"[Worker] Chunk {chunk_index}: ✅ Exists. Skipping.")
+                sys.exit(0)
+            else:
+                 print(f"[Worker] Chunk {chunk_index}: ⚠️ Found empty file, regenerating.")
 
         current_cap = min(CHUNK_SIZE, total_frames - start_frame)
-        print(f"[Worker] Chunk {chunk_index}: {current_cap} frames...")
+        print(f"[Worker] Chunk {chunk_index}: Generating {current_cap} frames...")
 
         with open(workflow_file, "r", encoding="utf-8") as f:
             workflow = json.load(f)
@@ -136,7 +145,6 @@ def worker_process(video_path, workflow_file, start_frame, run_id):
 
         if NODE_ID_SAVER in workflow:
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
-            # ここで強制的に30fpsをComfyUIに伝えます
             workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = target_fps 
 
         res = queue_prompt(workflow)
@@ -159,8 +167,29 @@ def manager_process(original_video_path, workflow_file):
     
     base_name = os.path.splitext(os.path.basename(original_video_path))[0]
     safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:20]
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_id = f"{safe_base_name}_{timestamp}"
+    
+    # ★★★ ここが変更点: 既存のRun IDを探す ★★★
+    # outputフォルダ内に、この動画の名前で始まる断片があるか探す
+    search_pattern = os.path.join(COMFYUI_OUTPUT_DIR, f"{safe_base_name}*_part_*{OUTPUT_EXT}")
+    existing_chunks = glob.glob(search_pattern)
+    
+    if existing_chunks:
+        # 見つかった場合、最新のファイルのIDを再利用する
+        latest_file = max(existing_chunks, key=os.path.getctime)
+        # ファイル名からRun ID (日付入り) を抽出
+        # 例: SafeName_20231222_120000_part_001.mp4 -> SafeName_20231222_120000
+        match = re.match(r"(.+)_part_\d+", os.path.basename(latest_file))
+        if match:
+            run_id = match.group(1)
+            print(f"🔄 Resuming existing run: {run_id}")
+            print(f"   (Existing chunks will be skipped)")
+        else:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = f"{safe_base_name}_{timestamp}"
+    else:
+        # 新規作成
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = f"{safe_base_name}_{timestamp}"
 
     tasks = []
     for i in range(0, total_frames, CHUNK_SIZE):
@@ -184,8 +213,11 @@ def manager_process(original_video_path, workflow_file):
             try:
                 next_start_frame = next(task_iter)
                 chunk_index = next_start_frame // CHUNK_SIZE
+                
+                # ワーカー起動前にマネージャー側でも簡易チェック（高速化のため）
                 part_prefix = f"{run_id}_part_{chunk_index:03d}"
                 if glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{part_prefix}*{OUTPUT_EXT}")):
+                    print(f"[Manager] Chunk {chunk_index} exists. Skipping spawn.")
                     continue
 
                 cmd = [sys.executable, __file__, original_video_path, workflow_file, 
