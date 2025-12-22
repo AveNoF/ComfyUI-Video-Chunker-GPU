@@ -14,7 +14,7 @@ import re
 # ================= Configuration =================
 COMFYUI_URL = "http://127.0.0.1:8188"
 DEFAULT_WORKFLOW_FILE = "workflow_api.json"
-CHUNK_SIZE = 1000          
+CHUNK_SIZE = 500          
 MAX_PARALLEL_WORKERS = 1   
 OUTPUT_EXT = ".mp4"
 NODE_ID_LOADER = "1"       
