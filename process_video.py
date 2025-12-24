@@ -15,7 +15,7 @@ import shutil
 # ================= Configuration =================
 COMFYUI_URL = "http://127.0.0.1:8188"
 DEFAULT_WORKFLOW_FILE = "workflow_api.json"
-CHUNK_SIZE = 500           # メモリ不足対策で500に設定
+CHUNK_SIZE = 500           # メモリ不足対策で500
 MAX_PARALLEL_WORKERS = 1   
 OUTPUT_EXT = ".mp4"
 NODE_ID_LOADER = "1"       
@@ -47,31 +47,62 @@ def wait_for_prompt_completion(prompt_id):
         except: pass
         time.sleep(1.0)
 
-def merge_videos_in_folder(target_folder, output_filename, original_video_path):
+def merge_videos_in_folder_smart(target_folder, output_filename, original_video_path):
     """
-    指定されたフォルダの中にある part_xxx.mp4 だけを結合する。
-    他のフォルダのファイルが混ざることはない。
+    重複排除・オーディオ有無の選別を行い、スマートに結合する。
     """
     print(f"\n=== Merging files inside: {os.path.basename(target_folder)} ===")
     
-    # このフォルダ内の part_xxx.mp4 を検索
-    search_pattern = os.path.join(target_folder, f"part_*{OUTPUT_EXT}")
-    files = glob.glob(search_pattern)
+    # 全てのmp4を取得
+    search_pattern = os.path.join(target_folder, f"*{OUTPUT_EXT}")
+    all_files = glob.glob(search_pattern)
     
-    if not files:
+    if not all_files:
         print("❌ No part files found in the folder.")
         return
 
-    # パート番号順に並べ替え
-    def get_part_num(fname):
-        match = re.search(r"part_(\d+)", fname)
-        return int(match.group(1)) if match else 999999
-    
-    files.sort(key=get_part_num)
+    # パート番号ごとにファイルをグループ化
+    # key: パート番号(int), value: [ファイルパスのリスト]
+    part_map = {}
+    pattern = re.compile(r"part_(\d+)")
 
+    for f_path in all_files:
+        fname = os.path.basename(f_path)
+        # "merged" という名前が入っているファイル（以前の結合結果など）は除外
+        if "merged" in fname: continue
+        
+        match = pattern.search(fname)
+        if match:
+            part_idx = int(match.group(1))
+            if part_idx not in part_map: part_map[part_idx] = []
+            part_map[part_idx].append(f_path)
+    
+    # 結合リストを作成
+    final_list = []
+    sorted_indices = sorted(part_map.keys())
+    
+    print(f"   Found {len(sorted_indices)} unique parts.")
+
+    for idx in sorted_indices:
+        candidates = part_map[idx]
+        
+        # 候補が複数ある場合（例: part_001.mp4 と part_001-audio.mp4）
+        selected_file = candidates[0]
+        
+        if len(candidates) > 1:
+            # 基本的にファイル名が短い方（余計なサフィックスがない方）を選ぶ、
+            # またはファイルサイズが大きい方を選ぶなどのロジックを入れる
+            # ここでは「-audio」などがついていないシンプルなものを優先するロジック
+            candidates.sort(key=len) 
+            selected_file = candidates[0] 
+            # もしaudio付きを優先したいなら逆にするが、結合時に元動画の音声を使うので映像のみでOK
+            
+        final_list.append(selected_file)
+
+    # リスト書き出し
     list_txt = os.path.join(target_folder, "concat_list.txt")
     with open(list_txt, "w", encoding="utf-8") as f:
-        for vid in files:
+        for vid in final_list:
             safe_vid = os.path.abspath(vid).replace("'", "'\\''")
             f.write(f"file '{safe_vid}'\n")
 
@@ -89,7 +120,6 @@ def merge_videos_in_folder(target_folder, output_filename, original_video_path):
     ]
     
     try:
-        # NVENCチェック
         subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         cmd_final[cmd_final.index("-c:v") + 1] = "h264_nvenc"
     except: pass 
@@ -112,28 +142,25 @@ def worker_process(video_path, workflow_file, start_frame, run_dir_name):
 
         chunk_index = start_frame // CHUNK_SIZE
         
-        # フォルダ構成: ComfyUI/output/{run_dir_name}/part_001.mp4
-        # ComfyUIのfilename_prefixに「フォルダ名/ファイル名」を指定すると自動でフォルダが掘られる
+        # フォルダ指定
         part_prefix = f"{run_dir_name}/part_{chunk_index:03d}"
-        
-        # 生成済みチェック
         full_output_dir = os.path.join(COMFYUI_OUTPUT_DIR, run_dir_name)
-        expected_filename = f"part_{chunk_index:03d}{OUTPUT_EXT}" # ComfyUIが保存する実際の名前
-        # ※ComfyUIは番号を勝手につける場合があるが、prefixで指定すれば固定できることが多い
         
-        # 簡易チェック: そのフォルダに part_001_xxxxx.mp4 みたいなのがあればスキップ
+        # 重複生成チェック
+        # part_001.mp4, part_001_00001_.mp4 などバリエーションがあっても「1つあればOK」とする
         search_pattern = os.path.join(full_output_dir, f"part_{chunk_index:03d}*{OUTPUT_EXT}")
         existing = glob.glob(search_pattern)
 
         if existing:
-            if os.path.getsize(existing[0]) > 1024:
-                print(f"[Worker] Chunk {chunk_index}: ✅ Exists in folder. Skipping.")
+            # 0バイトでなければスキップ
+            if any(os.path.getsize(f) > 1024 for f in existing):
+                print(f"[Worker] Chunk {chunk_index}: ✅ Exists. Skipping.")
                 sys.exit(0)
             else:
                  print(f"[Worker] Chunk {chunk_index}: ⚠️ Found empty file, regenerating.")
 
         current_cap = min(CHUNK_SIZE, total_frames - start_frame)
-        print(f"[Worker] Chunk {chunk_index}: Generating {current_cap} frames into folder '{run_dir_name}'...")
+        print(f"[Worker] Chunk {chunk_index}: Generating {current_cap} frames...")
 
         with open(workflow_file, "r", encoding="utf-8") as f:
             workflow = json.load(f)
@@ -144,7 +171,6 @@ def worker_process(video_path, workflow_file, start_frame, run_dir_name):
             workflow[NODE_ID_LOADER]["inputs"]["video"] = os.path.abspath(video_path)
 
         if NODE_ID_SAVER in workflow:
-            # ★重要: ここでサブフォルダを指定
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
             workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = target_fps 
 
@@ -160,29 +186,24 @@ def worker_process(video_path, workflow_file, start_frame, run_dir_name):
         sys.exit(1)
 
 def manager_process(original_video_path, workflow_file):
-    print(f"=== Manager Started (Folder Isolation Mode) ===")
+    print(f"=== Manager Started (Smart Isolated Mode) ===")
     cap = cv2.VideoCapture(original_video_path)
     if not cap.isOpened(): return
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     
     base_name = os.path.splitext(os.path.basename(original_video_path))[0]
-    # ファイル名から安全なフォルダ名を作成
     safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:30]
     
-    # === フォルダ戦略 ===
-    # 1. outputフォルダの中に、この動画専用のフォルダがあるか探す (Resume機能)
-    #    名前のパターン: "SafeName_Timestamp"
+    # フォルダ再利用ロジック
     potential_dirs = glob.glob(os.path.join(COMFYUI_OUTPUT_DIR, f"{safe_base_name}_*"))
     potential_dirs = [d for d in potential_dirs if os.path.isdir(d)]
     
     if potential_dirs:
-        # 一番新しいフォルダを再利用する（続きから）
         target_dir_path = max(potential_dirs, key=os.path.getmtime)
         run_dir_name = os.path.basename(target_dir_path)
         print(f"🔄 Resuming job in existing folder: {run_dir_name}")
     else:
-        # 新しいフォルダを作る
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         run_dir_name = f"{safe_base_name}_{timestamp}"
         target_dir_path = os.path.join(COMFYUI_OUTPUT_DIR, run_dir_name)
@@ -212,16 +233,17 @@ def manager_process(original_video_path, workflow_file):
                 next_start_frame = next(task_iter)
                 chunk_index = next_start_frame // CHUNK_SIZE
                 
-                # ワーカー起動前にチェック
+                # ワーカー起動前チェック（高速化）
                 search_pattern = os.path.join(target_dir_path, f"part_{chunk_index:03d}*{OUTPUT_EXT}")
                 if glob.glob(search_pattern):
-                    print(f"[Manager] Chunk {chunk_index} exists. Skipping spawn.")
+                    # print(f"[Manager] Chunk {chunk_index} exists. Skipping spawn.") 
+                    # ログがうるさいのでコメントアウトしてもOK
                     continue
 
                 cmd = [sys.executable, __file__, original_video_path, workflow_file, 
                        "--worker_mode", 
                        "--start_frame", str(next_start_frame), 
-                       "--run_id", run_dir_name] # ここでフォルダ名を渡す
+                       "--run_id", run_dir_name]
                 proc = subprocess.Popen(cmd)
                 running_procs.append((proc, next_start_frame))
                 time.sleep(2) 
@@ -238,12 +260,9 @@ def manager_process(original_video_path, workflow_file):
 
     if not error_occurred:
         print("\n>>> All chunks completed!")
-        
-        # 最終出力ファイル名（親フォルダに保存）
         final_output_name = os.path.join(COMFYUI_OUTPUT_DIR, f"{run_dir_name}_merged{OUTPUT_EXT}")
-        
-        # その専用フォルダの中身だけを使って結合
-        merge_videos_in_folder(target_dir_path, final_output_name, original_video_path)
+        # スマート結合を実行
+        merge_videos_in_folder_smart(target_dir_path, final_output_name, original_video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -251,7 +270,7 @@ if __name__ == "__main__":
     parser.add_argument("workflow_file", nargs="?", default=DEFAULT_WORKFLOW_FILE, help="Path to workflow json")
     parser.add_argument("--worker_mode", action="store_true")
     parser.add_argument("--start_frame")
-    parser.add_argument("--run_id") # workerモードではこれが「フォルダ名」になる
+    parser.add_argument("--run_id") 
     args = parser.parse_args()
 
     if not args.video_path:
