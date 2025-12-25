@@ -16,12 +16,12 @@ import hashlib
 # ================= 設定エリア =================
 COMFYUI_URL = "http://127.0.0.1:8188"
 DEFAULT_WORKFLOW_FILE = "workflow_api.json"
-CHUNK_SIZE = 500           # メモリ不足対策で500フレーム区切り
+CHUNK_SIZE = 500           # メモリ対策
 MAX_PARALLEL_WORKERS = 1   
 OUTPUT_EXT = ".mp4"
 NODE_ID_LOADER = "1"       
 NODE_ID_SAVER = "4"        
-TARGET_FPS = 30.0          # ★30fps強制 (音ズレ防止の要)
+TARGET_FPS = 30.0          # 音ズレ防止（30fps固定）
 # ============================================
 
 USER_HOME = os.path.expanduser("~")
@@ -29,7 +29,6 @@ COMFYUI_OUTPUT_DIR = os.path.join(USER_HOME, "ComfyUI", "output")
 sys.stdout.reconfigure(encoding='utf-8')
 
 def get_video_duration(file_path):
-    """動画の正確な長さ（秒）を取得"""
     try:
         cmd = [
             "ffprobe", "-v", "error", 
@@ -66,7 +65,6 @@ def wait_for_prompt_completion(prompt_id):
 def merge_videos_in_folder_smart(target_folder, output_filename, original_video_path):
     print(f"\n=== Merging files inside folder: {os.path.basename(target_folder)} ===")
     
-    # 作業フォルダ内の全MP4を取得
     search_pattern = os.path.join(target_folder, f"*{OUTPUT_EXT}")
     all_files = glob.glob(search_pattern)
     
@@ -74,13 +72,12 @@ def merge_videos_in_folder_smart(target_folder, output_filename, original_video_
         print("❌ No part files found in the folder.")
         return
 
-    # === 重複排除 & 選別ロジック ===
     part_map = {}
     pattern = re.compile(r"part_(\d+)")
 
     for f_path in all_files:
         fname = os.path.basename(f_path)
-        if "merged" in fname: continue # 結合済みファイルがもしあれば除外
+        if "merged" in fname: continue
         
         match = pattern.search(fname)
         if match:
@@ -95,32 +92,26 @@ def merge_videos_in_folder_smart(target_folder, output_filename, original_video_
 
     for idx in sorted_indices:
         candidates = part_map[idx]
-        
-        # 候補が複数ある場合（例: part_001.mp4, part_001_audio.mp4）
-        # 名前が一番短いもの（余計なsuffixがないもの）を正とする
         if len(candidates) > 1:
             candidates.sort(key=len) 
             selected = candidates[0]
         else:
             selected = candidates[0]
-            
         final_list.append(selected)
 
-    # 結合用リスト作成
     list_txt = os.path.join(target_folder, "concat_list.txt")
     with open(list_txt, "w", encoding="utf-8") as f:
         for vid in final_list:
             safe_vid = os.path.abspath(vid).replace("'", "'\\''")
             f.write(f"file '{safe_vid}'\n")
 
-    # 結合実行 (元動画の音声を使用)
     cmd_final = [
         "ffmpeg", "-y",
         "-f", "concat", "-safe", "0", "-i", list_txt, 
-        "-i", original_video_path,        # 音声ソース
-        "-map", "0:v",                    # 映像：結合したパーツ
-        "-map", "1:a?",                   # 音声：元動画
-        "-c:v", "libx264",                # 再エンコード
+        "-i", original_video_path,        
+        "-map", "0:v",                    
+        "-map", "1:a?",                   
+        "-c:v", "libx264",                
         "-preset", "p5",            
         "-crf", "18",
         "-c:a", "aac",              
@@ -129,14 +120,13 @@ def merge_videos_in_folder_smart(target_folder, output_filename, original_video_
     
     try:
         subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        cmd_final[cmd_final.index("-c:v") + 1] = "h264_nvenc" # NVENCがあれば使う
+        cmd_final[cmd_final.index("-c:v") + 1] = "h264_nvenc"
     except: pass 
 
     try:
         subprocess.run(cmd_final, check=True, stderr=subprocess.DEVNULL)
         print(f"✅ Merge Success! Final output: {os.path.basename(output_filename)}")
         
-        # === 秒数チェック ===
         orig_dur = get_video_duration(original_video_path)
         new_dur = get_video_duration(output_filename)
         
@@ -167,16 +157,12 @@ def worker_process(video_path, workflow_file, start_frame, run_dir_name):
         cap.release()
 
         chunk_index = start_frame // CHUNK_SIZE
-        
-        # ★ここ重要: Workerはハッシュフォルダの中に保存する
         part_prefix = f"{run_dir_name}/part_{chunk_index:03d}"
         
-        # 生成済みチェック用パス
         full_output_dir = os.path.join(COMFYUI_OUTPUT_DIR, run_dir_name)
         search_pattern = os.path.join(full_output_dir, f"part_{chunk_index:03d}*{OUTPUT_EXT}")
         existing = glob.glob(search_pattern)
 
-        # 既にファイルがあり、サイズが十分ならスキップ
         if existing:
             if any(os.path.getsize(f) > 1024 for f in existing):
                 print(f"[Worker] Chunk {chunk_index}: ✅ Exists in hash folder. Skipping.")
@@ -197,7 +183,6 @@ def worker_process(video_path, workflow_file, start_frame, run_dir_name):
 
         if NODE_ID_SAVER in workflow:
             workflow[NODE_ID_SAVER]["inputs"]["filename_prefix"] = part_prefix
-            # ★30fps強制
             workflow[NODE_ID_SAVER]["inputs"]["frame_rate"] = TARGET_FPS 
 
         res = queue_prompt(workflow)
@@ -218,19 +203,13 @@ def manager_process(original_video_path, workflow_file):
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     
-    # 1. ファイル名から安全な名前を作る (SISTERS_千夏01)
     base_name = os.path.splitext(os.path.basename(original_video_path))[0]
     safe_base_name = "".join([c if c.isalnum() or c in (' ', '.', '_', '-') else '_' for c in base_name])[:20]
-    
-    # 2. ハッシュ値を計算 (混ざり防止・再開機能の核)
-    # ファイル名が同じなら、いつ実行しても同じハッシュになる -> 確実に再開できる
     filename_hash = hashlib.md5(base_name.encode('utf-8')).hexdigest()[:8]
     
-    # 3. 作業用フォルダ名: 名前_ハッシュ (例: SISTERS_a1b2c3d4)
     run_dir_name = f"{safe_base_name}_{filename_hash}"
     target_dir_path = os.path.join(COMFYUI_OUTPUT_DIR, run_dir_name)
     
-    # フォルダ確認・作成
     if os.path.exists(target_dir_path):
         print(f"🔄 Resuming hash folder: {run_dir_name}")
     else:
@@ -260,14 +239,58 @@ def manager_process(original_video_path, workflow_file):
                 next_start_frame = next(task_iter)
                 chunk_index = next_start_frame // CHUNK_SIZE
                 
-                # 作業フォルダの中に、該当パーツがあるかチェック
                 search_pattern = os.path.join(target_dir_path, f"part_{chunk_index:03d}*{OUTPUT_EXT}")
                 if glob.glob(search_pattern):
-                    # すでにあればスキップ (ここが再開機能)
                     continue
 
-                cmd = [sys.executable, __file__, original_video_path, workflow_file, 
-                       "--worker_mode", 
-                       "--start_frame", str(next_start_frame), 
-                       "--run_id", run_dir_name] # Workerには作業フォルダ名を渡す
-                proc = subprocess.Popen(
+                # ★修正箇所：コマンド定義を明確に記述
+                cmd = [
+                    sys.executable, 
+                    __file__, 
+                    original_video_path, 
+                    workflow_file, 
+                    "--worker_mode", 
+                    "--start_frame", str(next_start_frame), 
+                    "--run_id", run_dir_name
+                ]
+                proc = subprocess.Popen(cmd)
+                
+                running_procs.append((proc, next_start_frame))
+                time.sleep(2) 
+            except StopIteration:
+                break 
+        
+        if not running_procs:
+            try:
+                next(iter(tasks))
+                break 
+            except:
+                break 
+        time.sleep(1)
+
+    if not error_occurred:
+        print("\n>>> All chunks completed!")
+        final_output_name = os.path.join(COMFYUI_OUTPUT_DIR, f"{base_name}_upscaled{OUTPUT_EXT}")
+        merge_videos_in_folder_smart(target_dir_path, final_output_name, original_video_path)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("video_path", nargs="?", help="Path to video file")
+    parser.add_argument("workflow_file", nargs="?", default=DEFAULT_WORKFLOW_FILE, help="Path to workflow json")
+    parser.add_argument("--worker_mode", action="store_true")
+    parser.add_argument("--start_frame")
+    parser.add_argument("--run_id") 
+    args = parser.parse_args()
+
+    if not args.video_path:
+        if args.worker_mode: sys.exit(1)
+        try:
+            input_path = input("Enter video file path: ").strip().strip("'").strip('"')
+            if not input_path: sys.exit(0)
+            args.video_path = input_path
+        except: sys.exit(0)
+
+    if args.worker_mode:
+        worker_process(args.video_path, args.workflow_file, args.start_frame, args.run_id)
+    else:
+        manager_process(args.video_path, args.workflow_file)
