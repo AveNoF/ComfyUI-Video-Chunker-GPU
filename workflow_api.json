@@ -15,15 +15,6 @@
       "title": "Load Video (Upload) 🎥🅥🅗🅢"
     }
   },
-  "2": {
-    "inputs": {
-      "model_name": "RealESRGAN_x4plus_anime_6B.pth"
-    },
-    "class_type": "UpscaleModelLoader",
-    "_meta": {
-      "title": "拡大モデルを読み込む"
-    }
-  },
   "4": {
     "inputs": {
       "frame_rate": 30,
@@ -37,7 +28,7 @@
       "pingpong": false,
       "save_output": true,
       "images": [
-        "10",
+        "15",
         0
       ],
       "audio": [
@@ -50,28 +41,39 @@
       "title": "Video Combine 🎥🅥🅗🅢"
     }
   },
-  "6": {
+  "12": {
     "inputs": {
-      "upscale_model": [
-        "2",
+      "resize_to": "none",
+      "images": [
+        "1",
         0
       ],
-      "image": [
-        "1",
+      "upscaler_trt_model": [
+        "14",
         0
       ]
     },
-    "class_type": "ImageUpscaleWithModel",
+    "class_type": "UpscalerTensorrt",
     "_meta": {
-      "title": "モデルを使用して画像を拡大"
+      "title": "Upscaler Tensorrt ⚡"
     }
   },
-  "10": {
+  "14": {
     "inputs": {
-      "upscale_method": "area",
+      "model": "4x-UltraSharp",
+      "precision": "fp16"
+    },
+    "class_type": "LoadUpscalerTensorrtModel",
+    "_meta": {
+      "title": "Load Upscale Tensorrt Model"
+    }
+  },
+  "15": {
+    "inputs": {
+      "upscale_method": "nearest-exact",
       "scale_by": 0.5,
       "image": [
-        "6",
+        "12",
         0
       ]
     },
